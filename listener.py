@@ -2,26 +2,34 @@
 
 import socket, sys
 import ipWhitelist
+import inotify
+import configparser
 
-# TODO - Make Host/port part of a config file
 # TODO - soc.listen(X) a variable in config?
 # TODO - would threading help improve high volume performance?
+# TODO - check for config file, if none write one, have defaults set
 
-HOST = ''
-PORT = 9500
+# Parse config file
+config = configparser.ConfigParser()
+with open('./config','r') as config_file:
+    config.read_file(config_file)
+
+host = config['Default']['host']
+port = config['Default']['port']
+listeners = config['Default']['listeners']
 
 soc = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 soc.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
 try:
-    soc.bind((HOST, PORT))
+    soc.bind((host, port))
 except:
     print('Bind failed. Address:Port already in use?')
     sys.exit()
 
-print(f'Listening on {HOST}:{PORT}')
+print(f'Listening on {host}:{port}')
 
-soc.listen(4)
+soc.listen(listeners)
 
 while True:
     # Wait for a connection

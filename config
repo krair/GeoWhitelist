@@ -1,0 +1,8 @@
+[Default]
+host = ""
+port = 9500
+listeners = 4
+
+serviceurl = "https://get.geojs.io/v1/ip/geo/"
+
+redis = True
