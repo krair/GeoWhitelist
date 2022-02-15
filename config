@@ -2,7 +2,29 @@
 host = ""
 port = 9500
 listeners = 4
+# Length of time to keep an IP in cache (default 10800s or 3h)
+cache.expiry = 10800
 
+[GeoLookup]
 serviceurl = "https://get.geojs.io/v1/ip/geo/"
 
+[loggers]
+keys=root
+[handlers]
+keys=console
+[formatters]
+keys=
+[logger_root]
+level = INFO
+handlers=console
+[handler_console]
+class=StreamHandler
+level=NOTSET
+args=(sys.stdout,)
+
+[Redis]
 redis = True
+redis.host = localhost
+redis.port = 6379
+redis.password = ""
+redis.db = 0

@@ -1,32 +1,131 @@
 #!/usr/bin/python3
 
 import ipaddress
-import getCountryCode as gcc
 import redis
-import logging
+import logging, logging.config
+
+import urllib.request, urllib.parse
+import json
+
+import socket, sys
+import inotify
+import configparser
 
 # TODO - For smaller installations, simplify without Redis?
+# TODO - add time element for whitelist (-1 forever, or 1 day for ex)
+
 # TODO - What do use to avoid a buildup of queries overloading the system?
 # TODO - If a big whitelist of IP's, load into redis beforehand? Persistent?
-# TODO - If no 'region' given in response, do a GMaps API call with lat/lon
 # TODO - prevent local IP spoofing?
 # TODO - add reason for WL/Ban to redis entry?
 # TODO - add a way to modify the whitelist on the fly and flush previous entries
 # TODO - check that at least 1 WL is available (maybe a file error or otherwise)
 
-logging.basicConfig(level=logging.INFO)
+# TODO - LATER -If no 'region' given in response, do a GMaps API call with lat/lon
 
-# Setup Redis
-r = redis.Redis(host='localhost', port=6379, db=0, password=None, socket_timeout=None)
-logging.debug("Redis setup")
+# Parse config file
+config = configparser.ConfigParser()
+with open('./config','r') as config_file:
+    config.read_file(config_file)
 
+host = config['Default']['host']
+port = config['Default']['port']
+listeners = config['Default']['listeners']
 # Default 3h window to keep in Redis
-expiry = 60 * 180
+expiry = config['Default']['cache.expiry']
 
-# Testing purposes
-wl_ip = {}
-#wl = {("FR", None),("US", "California"),("US", "Oregon")}
-wl = {("US", "California"),("US", "Oregon")}
+# Set Logging config
+logging.config.fileConfig(config)
+
+# Setup cache
+cache = False
+While not cache
+    # Setup Redis cache
+    if config['Redis'].getboolean('redis'):
+        r = redis.Redis(host=config['Redis']['redis.host'], \
+                    port=config['Redis']['redis.port'], \
+                    db=config['Redis']['redis.db'], \
+                    password=config['Redis']['redis.password'], \
+                    socket_timeout=None)
+        try:
+            redis.ping()
+            logging.info("Connected to Redis")
+            logging.debug(f"Redis using: {config['Redis']['redis.host']}:{config['Redis']['redis.port']}")
+            cache = True
+        except:
+            logging.error("Redis unreachable, switching to internal cache")
+            config['Redis']['redis'] = 'False'
+    else:
+        # internal cache here
+        cache = True
+        pass
+
+# Create whitelist (change to an async function with inotify)
+wl_config = configparser.ConfigParser()
+with open('./whitelist','r') as config_file:
+    wl_config.read_file(config_file)
+
+wl_ip = set()
+wl_cidr = list()
+wl_geo = set()
+
+if wl['IP'].values():
+    wl_config_ip = [v.split() for v in wl['IP'].values()][0]
+    for i in wl_config_ip:
+        try:
+            if '/' in i:
+                wl_cidr.append(ipaddress.ip_network(i))
+            else:
+                wl_ip.add(ipaddress.ip_address(i))
+        except:
+            logging.warning(f"IP address {i} in whitelist is not valid, skipping")
+
+if wl['Geo'].values():
+    # Pull values out of configparser
+    wl_config_geo = [v.split() for v in wl['Geo'].values()][0]
+    try:
+        # Countries with region set
+        wl_geo = set([tuple(i.split('/')) for i in wl_config_geo if '/' in i])
+        o = set([(i,None) for i in wl_config_geo if '/' not in i])
+        wl_geo.update(o)
+        logging.debug(f"Geo whitelist created: {wl_geo}")
+    except:
+        logging.error("Problem with Geo whitelist config!")
+
+# TODO - soc.listen(X) a variable in config?
+# TODO - would threading help improve high volume performance?
+# TODO - check for config file, if none write one, have defaults set
+
+# Setup socket listener
+soc = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+soc.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+
+try:
+    soc.bind((host, port))
+except:
+    print('Bind failed. Address:Port already in use?')
+    sys.exit()
+
+print(f'Listening on {host}:{port}')
+
+soc.listen(listeners)
+
+
+def getGeo(address):
+    """Utilizes geojs.io which currently doesn't have any limits on it and is a
+       public API. In the future I might add others as a round-robbin situation
+       to reduce data sent to a single endpoint.
+    """
+    # Use a different endpoint if you like
+    serviceURL = "https://get.geojs.io/v1/ip/geo/"
+    # Encode ip (especially v6) into url
+    url = serviceURL + urllib.parse.quote(address)
+    # Grab data from URL
+    data = urllib.request.urlopen(url)
+    # Turn the data into a json (dict)
+    rec = json.loads(data.read().decode())
+
+    return rec
 
 
 def checkIP(ip):
@@ -38,36 +137,36 @@ def checkIP(ip):
         logging.critical("Arg passed to method is not an IP!")
         return False
     logging.debug(f"IP obj is {ipObj.compressed}")
-    # Allow local addresses
-    if ipObj.is_loopback or ipObj.is_private or ipObj.is_link_local:
-        logging.info("IP is Loopback, Private, or Link Local")
+    # Allow loopback and link-local addresses
+    if ipObj.is_loopback or ipObj.is_link_local:
+        logging.info(f"{ipObj.compressed} is Loopback, or Link Local")
         return True
     # Block unspecified and multicast
     elif ipObj.is_unspecified or ipObj.is_multicast:
-        logging.info("IP is unspecified or multicast")
+        logging.info(f"{ipObj.compressed} is unspecified or multicast")
         return False
     # Continue into redis
     else:
         logging.debug("Pass request to redisQuery")
-        return redisQuery(ipObj.compressed)
+        return redisQuery(ipObj)
 
-def redisQuery(ip):
+def redisQuery(ipObj):
     # Check if IP exists in redis
-    if r.exists(ip):
-        logging.debug("IP exists in Redis Cache")
+    if r.exists(ipObj.compressed):
+        logging.debug(f"{ipObj.compressed} exists in Redis Cache")
         # If returns True, Send True(200 OK)
-        if r.get(ip) == b'True':
-            logging.info("IP is TRUE in Redis Cache")
+        if r.get(ipObj.compressed) == b'True':
+            logging.debug(f"{ipObj.compressed} is TRUE in Redis Cache")
             return True
         # If returns False (or anything else), send False(403)
         else:
-            logging.info("IP is FALSE in Redis Cache")
+            logging.info(f"{ipObj.compressed} is FALSE in Redis Cache")
             return False
 
     # If entry does not exist in cache, find IP information, create decision
     else:
-        logging.debug("IP not in Redis Cache, pass to WL query")
-        return queryWhitelists(ip)
+        logging.debug(f"{ipObj.compressed} not in Redis Cache, pass to WL query")
+        return queryWhitelists(ipObj)
 
 def redisAdd(ip, decision):
     if decision == True:
@@ -79,38 +178,40 @@ def redisAdd(ip, decision):
         r.setex(ip, expiry, 'False')
         return False
 
-def queryWhitelists(ip):
-    # Does a wl_ip exist and is the ip in the WL?
-    if wl_ip and (ip in wl_ip):
-        logging.info("IP WL exists and IP in WL")
-        return redisAdd(ip, True)
-    # if a WL exists (geo) continue
-    elif wl:
-        logging.debug("IP not in IP WL, Geo WL exists")
+def queryWhitelists(ipObj):
+    # Check IP based whitelists
+    if ipObj in wl_ip:
+        logging.info(f"{ipObj.compressed} in WL_IP")
+        return redisAdd(ipObj.compressed, True)
+
+    elif wl_cidr:
+        for rg in wl_cidr:
+            if ipObj in rg:
+                logging.info(f"{ipObj.compressed} in WL_CIDR")
+                return redisAdd(ipObj.compressed, True)
+
+    # Try geographical WL
+    else:
         try:
-            geo = gcc.getGeo(ip)
+            geo = getGeo(ipObj.compressed)
             logging.debug(f"Geo info found: {geo}")
-            return geoQuery(geo, ip)
+            return geoQuery(geo, ipObj.compressed)
         except:
             # Unable to get geo info
-            logging.error("Unable to get geo info!")
+            logging.error(f"Unable to get geo info for {ipObj.compressed}!")
             return False
-    # If ip not in wl_ip, and no wl (geo) exists, send 403
-    else:
-        logging.info("IP not in ip_WL, no geo WL exists!")
-        return False
 
 def geoQuery(geo, ip):
     # If using a geo whitelist
     try:
         # Create subset of countries in WL (if fails, log parameter error)
-        wl_country = {i[0] for i in wl}
+        wl_country = {i[0] for i in wl_geo}
         logging.debug(f"Countries in WL: {wl_country}")
         # Check if ip in country WL
         if geo['country_code'] in wl_country:
             logging.info(f"Country Code: {geo['country_code']} found in WL")
             # Create subset of regions in WL
-            wl_region = {i[1] for i in wl if i[0] == geo['country_code'] and i[1] != None}
+            wl_region = {i[1] for i in wl_geo if i[0] == geo['country_code'] and i[1] != None}
             logging.debug(f"Regions in WL: {wl_region}")
             # Check if the country we are checking has a region limitation
             if wl_region:
@@ -142,3 +243,35 @@ def geoQuery(geo, ip):
         # Reject no country_code found, or problem with wl
         logging.warning(f"Problem with WL file or {ip} has no Country Code!")
         return redisAdd(ip, False)
+
+while True:
+    # Wait for a connection
+    connection, client_address = soc.accept()
+    # Receive the data in small chunks
+    data = connection.recv(1024).decode('utf-8')
+    if not data:
+        break
+
+    # Grab the X-Forward-For Header (could improve with index method?)
+    xForwardFor = data.split("\r\n")[3]
+    # Pull the ip from the header
+    ip = xForwardFor[xForwardFor.index(":") + 2:]
+
+    # Send the ip to our Whitelist checking applet
+    decision = checkIP(ip)
+
+    # OK
+    if decision:
+        header = "HTTP/1.1 200 OK\r\n"
+        ok = "Content-Type: 'default_type text/plain'\r\nConnection: Closed\r\n\r\nOK"
+        response = header + ok
+        connection.send(response.encode('utf-8'))
+        connection.close()
+
+    # Forbidden
+    else:
+        header = "HTTP/1.1 403 FORBIDDEN\r\n"
+        nope = "Content-Type: 'default_type text/plain'\r\nConnection: Closed\r\n\r\n403 Forbidden"
+        response = header + nope
+        connection.send(response.encode('utf-8'))
+        connection.close()

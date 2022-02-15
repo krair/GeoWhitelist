@@ -1,1 +1,2 @@
-*pycache*
+__pycache__/
+dev/
