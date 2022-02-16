@@ -25,7 +25,7 @@ import configparser
 
 # Parse config file
 config = configparser.ConfigParser()
-with open('./config','r') as config_file:
+with open('./config/config.ini','r') as config_file:
     config.read_file(config_file)
 
 host = config['Default']['host']
@@ -62,7 +62,7 @@ While not cache
 
 # Create whitelist (change to an async function with inotify)
 wl_config = configparser.ConfigParser()
-with open('./whitelist','r') as config_file:
+with open('./config/whitelist.ini','r') as config_file:
     wl_config.read_file(config_file)
 
 wl_ip = set()
