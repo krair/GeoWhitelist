@@ -29,8 +29,8 @@ with open('./config/config.ini','r') as config_file:
     config.read_file(config_file)
 
 host = config['Default']['host']
-port = config['Default']['port']
-listeners = config['Default']['listeners']
+port = int(config['Default']['port'])
+listeners = int(config['Default']['listeners'])
 # Default 3h window to keep in Redis
 expiry = config['Default']['cache.expiry']
 
@@ -39,16 +39,16 @@ logging.config.fileConfig(config)
 
 # Setup cache
 cache = False
-While not cache
+while not cache:
     # Setup Redis cache
     if config['Redis'].getboolean('redis'):
         r = redis.Redis(host=config['Redis']['redis.host'], \
                     port=config['Redis']['redis.port'], \
                     db=config['Redis']['redis.db'], \
-                    password=config['Redis']['redis.password'], \
+#                    password=config['Redis']['redis.password'], \
                     socket_timeout=None)
         try:
-            redis.ping()
+            r.ping()
             logging.info("Connected to Redis")
             logging.debug(f"Redis using: {config['Redis']['redis.host']}:{config['Redis']['redis.port']}")
             cache = True
@@ -69,8 +69,8 @@ wl_ip = set()
 wl_cidr = list()
 wl_geo = set()
 
-if wl['IP'].values():
-    wl_config_ip = [v.split() for v in wl['IP'].values()][0]
+if wl_config['IP'].values():
+    wl_config_ip = [v.split() for v in wl_config['IP'].values()][0]
     for i in wl_config_ip:
         try:
             if '/' in i:
@@ -79,10 +79,11 @@ if wl['IP'].values():
                 wl_ip.add(ipaddress.ip_address(i))
         except:
             logging.warning(f"IP address {i} in whitelist is not valid, skipping")
+    logging.debug(f"IP_WL created: \nCIDR:{wl_cidr}\nIP:{wl_ip}")
 
-if wl['Geo'].values():
+if wl_config['Geo'].values():
     # Pull values out of configparser
-    wl_config_geo = [v.split() for v in wl['Geo'].values()][0]
+    wl_config_geo = [v.split() for v in wl_config['Geo'].values()][0]
     try:
         # Countries with region set
         wl_geo = set([tuple(i.split('/')) for i in wl_config_geo if '/' in i])
@@ -187,8 +188,8 @@ def queryWhitelists(ipObj):
         return redisAdd(ipObj.compressed, True)
 
     elif wl_cidr:
-        for r in wl_cidr:
-            if ipObj in r:
+        for rg in wl_cidr:
+            if ipObj in rg:
                 logging.info(f"{ipObj.compressed} in WL_CIDR")
                 return redisAdd(ipObj.compressed, True)
 
