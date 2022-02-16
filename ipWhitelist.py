@@ -1,36 +1,29 @@
-#!/usr/bin/python3
+from starlette.requests import Request
+from starlette.responses import Response
 
-import ipaddress
 import redis
-import logging, logging.config
-
-import urllib.request, urllib.parse
-import json
-
-import socket, sys
-import inotify
+import ipaddress
 import configparser
+import logging, logging.config
+import json
+import urllib.request, urllib.parse
 
 # TODO - For smaller installations, simplify without Redis?
 # TODO - add time element for whitelist (-1 forever, or 1 day for ex)
 
 # TODO - What do use to avoid a buildup of queries overloading the system?
 # TODO - If a big whitelist of IP's, load into redis beforehand? Persistent?
-# TODO - prevent local IP spoofing?
+# TODO - prevent IP spoofing?
 # TODO - add reason for WL/Ban to redis entry?
-# TODO - add a way to modify the whitelist on the fly and flush previous entries
 # TODO - check that at least 1 WL is available (maybe a file error or otherwise)
 
 # TODO - LATER -If no 'region' given in response, do a GMaps API call with lat/lon
 
-# Parse config file
+# setup
 config = configparser.ConfigParser()
 with open('./config/config.ini','r') as config_file:
     config.read_file(config_file)
 
-host = config['Default']['host']
-port = int(config['Default']['port'])
-listeners = int(config['Default']['listeners'])
 # Default 3h window to keep in Redis
 expiry = config['Default']['cache.expiry']
 
@@ -60,7 +53,7 @@ while not cache:
         cache = True
         pass
 
-# Create whitelist (change to an async function with inotify)
+# Create whitelist (change to an async function with watchgod)
 wl_config = configparser.ConfigParser()
 with open('./config/whitelist.ini','r') as config_file:
     wl_config.read_file(config_file)
@@ -95,26 +88,22 @@ if wl_config['Geo'].values():
     except:
         logging.error("Problem with Geo whitelist config!")
 
-# TODO - soc.listen(X) a variable in config?
-# TODO - would threading help improve high volume performance?
-# TODO - check for config file, if none write one, have defaults set
+print('Ready to go')
 
-# Setup socket listener
-soc = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-soc.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+async def app(scope, receive, send):
+    assert scope['type'] == 'http'
+    request = Request(scope, receive)
 
-try:
-    soc.bind((host, port))
-except:
-    print('Bind failed. Address:Port already in use?')
-    sys.exit()
+    xff = request.headers['x-forwarded-for']
+    decision = await checkIP(xff)
 
-print(f'Listening on {host}:{port}')
+    if decision == True:
+        response = Response('OK', status_code=200, media_type='text/plain')
+    else:
+        response = Response('FORBIDDEN', status_code=403, media_type='text/plain')
+    await response(scope, receive, send)
 
-soc.listen(listeners)
-
-
-def getGeo(address):
+async def getGeo(address):
     """Utilizes geojs.io which currently doesn't have any limits on it and is a
        public API. In the future I might add others as a round-robbin situation
        to reduce data sent to a single endpoint.
@@ -127,17 +116,15 @@ def getGeo(address):
     data = urllib.request.urlopen(url)
     # Turn the data into a json (dict)
     rec = json.loads(data.read().decode())
-
     return rec
 
-
-def checkIP(ip):
+async def checkIP(ip):
     # Turn address into an address object
     try:
         ipObj = ipaddress.ip_address(ip)
     except:
         # Not an ip address object!
-        logging.critical("Arg passed to method is not an IP!")
+        logging.critical(f"{ip} passed to method is not an IP!")
         return False
     logging.debug(f"IP obj is {ipObj.compressed}")
     # Allow loopback and link-local addresses
@@ -151,9 +138,9 @@ def checkIP(ip):
     # Continue into redis
     else:
         logging.debug(f"Pass {ipObj.compressed} request to redisQuery")
-        return redisQuery(ipObj)
+        await redisQuery(ipObj)
 
-def redisQuery(ipObj):
+async def redisQuery(ipObj):
     # Check if IP exists in redis
     if r.exists(ipObj.compressed):
         logging.debug(f"{ipObj.compressed} exists in Redis Cache")
@@ -169,42 +156,30 @@ def redisQuery(ipObj):
     # If entry does not exist in cache, find IP information, create decision
     else:
         logging.debug(f"{ipObj.compressed} not in Redis Cache, pass to WL query")
-        return queryWhitelists(ipObj)
+        await queryWhitelists(ipObj)
 
-def redisAdd(ip, decision):
-    if decision == True:
-        logging.info(f"IP {ip} Whitelisted, adding to Redis Cache")
-        r.setex(ip, expiry, 'True')
-        return True
-    else:
-        logging.info(f"IP {ip} Blacklisted, adding to Redis Cache")
-        r.setex(ip, expiry, 'False')
-        return False
-
-def queryWhitelists(ipObj):
+async def queryWhitelists(ipObj):
     # Check IP based whitelists
     if ipObj in wl_ip:
         logging.info(f"{ipObj.compressed} in WL_IP")
         return redisAdd(ipObj.compressed, True)
 
-    elif wl_cidr:
-        for rg in wl_cidr:
-            if ipObj in rg:
+    elif any(ipObj in rg for rg in wl_cidr):
                 logging.info(f"{ipObj.compressed} in WL_CIDR")
                 return redisAdd(ipObj.compressed, True)
 
     # Try geographical WL
     else:
         try:
-            geo = getGeo(ipObj.compressed)
+            geo = await getGeo(ipObj.compressed)
             logging.debug(f"Geo info found: {geo}")
-            return geoQuery(geo, ipObj.compressed)
+            await geoQuery(geo, ipObj.compressed)
         except:
             # Unable to get geo info
             logging.error(f"{ipObj.compressed} BLOCK - Unable to get geo info for IP!")
             return redisAdd({ipObj.compressed}, False)
 
-def geoQuery(geo, ip):
+async def geoQuery(geo, ip):
     # If using a geo whitelist
     try:
         # Create subset of countries in WL (if fails, log parameter error)
@@ -218,7 +193,6 @@ def geoQuery(geo, ip):
             logging.debug(f"Regions in WL: {wl_region}")
             # Check if the country we are checking has a region limitation
             if wl_region:
-                logging.debug("wl_region not a False(Empty) Value")
                 try:
                     # Is the request's region in the wl_region WL
                     if geo['region'] in wl_region:
@@ -227,13 +201,11 @@ def geoQuery(geo, ip):
                         return redisAdd(ip, True)
                     else:
                         # Request region not in WL
-                        logging.info(f"{ip} BLOCK - in Country WL: {geo['country_code']} \
-                                but {geo['region']} not in WL")
+                        logging.info(f"{ip} BLOCK - in Country WL: {geo['country_code']} but {geo['region']} not in WL")
                         return redisAdd(ip, False)
                 except:
                     # No region available in request
-                    logging.info(f"{ip} BLOCK - in Country WL: {geo['country_code']}, \
-                            but no Region for IP (region restriction exists)")
+                    logging.info(f"{ip} BLOCK - in Country WL: {geo['country_code']}, but no Region for IP (region restriction exists)")
                     return redisAdd(ip, False)
             else:
                 # No region limitation listed for Country, request OK
@@ -249,34 +221,12 @@ def geoQuery(geo, ip):
         logging.warning(f"{ip} BLOCK - Problem with WL file or IP has no Country Code!")
         return redisAdd(ip, False)
 
-while True:
-    # Wait for a connection
-    connection, client_address = soc.accept()
-    # Receive the data in small chunks
-    data = connection.recv(1024).decode('utf-8')
-    if not data:
-        break
-
-    # Grab the X-Forward-For Header (could improve with index method?)
-    xForwardFor = data.split("\r\n")[3]
-    # Pull the ip from the header
-    ip = xForwardFor[xForwardFor.index(":") + 2:]
-
-    # Send the ip to our Whitelist checking applet
-    decision = checkIP(ip)
-
-    # OK
-    if decision:
-        header = "HTTP/1.1 200 OK\r\n"
-        ok = "Content-Type: 'default_type text/plain'\r\nConnection: Closed\r\n\r\nOK"
-        response = header + ok
-        connection.send(response.encode('utf-8'))
-        connection.close()
-
-    # Forbidden
+def redisAdd(ip, decision):
+    if decision == True:
+        logging.info(f"IP {ip} Whitelisted, adding to Redis Cache")
+        r.setex(ip, expiry, 'True')
+        return True
     else:
-        header = "HTTP/1.1 403 FORBIDDEN\r\n"
-        nope = "Content-Type: 'default_type text/plain'\r\nConnection: Closed\r\n\r\n403 Forbidden"
-        response = header + nope
-        connection.send(response.encode('utf-8'))
-        connection.close()
+        logging.info(f"IP {ip} Blacklisted, adding to Redis Cache")
+        r.setex(ip, expiry, 'False')
+        return False
