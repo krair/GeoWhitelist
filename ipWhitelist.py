@@ -86,7 +86,9 @@ if wl['Geo'].values():
     try:
         # Countries with region set
         wl_geo = set([tuple(i.split('/')) for i in wl_config_geo if '/' in i])
+        # Countries with no region set
         o = set([(i,None) for i in wl_config_geo if '/' not in i])
+        # Combine sets
         wl_geo.update(o)
         logging.debug(f"Geo whitelist created: {wl_geo}")
     except:
@@ -139,15 +141,15 @@ def checkIP(ip):
     logging.debug(f"IP obj is {ipObj.compressed}")
     # Allow loopback and link-local addresses
     if ipObj.is_loopback or ipObj.is_link_local:
-        logging.info(f"{ipObj.compressed} is Loopback, or Link Local")
+        logging.info(f"{ipObj.compressed} OK - Loopback, or Link Local")
         return True
     # Block unspecified and multicast
     elif ipObj.is_unspecified or ipObj.is_multicast:
-        logging.info(f"{ipObj.compressed} is unspecified or multicast")
+        logging.info(f"{ipObj.compressed} BLOCK - unspecified or multicast")
         return False
     # Continue into redis
     else:
-        logging.debug("Pass request to redisQuery")
+        logging.debug(f"Pass {ipObj.compressed} request to redisQuery")
         return redisQuery(ipObj)
 
 def redisQuery(ipObj):
@@ -185,8 +187,8 @@ def queryWhitelists(ipObj):
         return redisAdd(ipObj.compressed, True)
 
     elif wl_cidr:
-        for rg in wl_cidr:
-            if ipObj in rg:
+        for r in wl_cidr:
+            if ipObj in r:
                 logging.info(f"{ipObj.compressed} in WL_CIDR")
                 return redisAdd(ipObj.compressed, True)
 
@@ -198,8 +200,8 @@ def queryWhitelists(ipObj):
             return geoQuery(geo, ipObj.compressed)
         except:
             # Unable to get geo info
-            logging.error(f"Unable to get geo info for {ipObj.compressed}!")
-            return False
+            logging.error(f"{ipObj.compressed} BLOCK - Unable to get geo info for IP!")
+            return redisAdd({ipObj.compressed}, False)
 
 def geoQuery(geo, ip):
     # If using a geo whitelist
@@ -209,7 +211,7 @@ def geoQuery(geo, ip):
         logging.debug(f"Countries in WL: {wl_country}")
         # Check if ip in country WL
         if geo['country_code'] in wl_country:
-            logging.info(f"Country Code: {geo['country_code']} found in WL")
+            logging.debug(f"Country Code: {geo['country_code']} found in WL")
             # Create subset of regions in WL
             wl_region = {i[1] for i in wl_geo if i[0] == geo['country_code'] and i[1] != None}
             logging.debug(f"Regions in WL: {wl_region}")
@@ -219,29 +221,31 @@ def geoQuery(geo, ip):
                 try:
                     # Is the request's region in the wl_region WL
                     if geo['region'] in wl_region:
-                        logging.info(f"Region: {geo['region']} found in WL")
+                        logging.info(f"{ip} OK - Region: {geo['region']} found in WL")
                         # Reqest region in WL
                         return redisAdd(ip, True)
                     else:
                         # Request region not in WL
-                        logging.info("IP in Country WL but Region not in Region WL")
+                        logging.info(f"{ip} BLOCK - in Country WL: {geo['country_code']} \
+                                but {geo['region']} not in WL")
                         return redisAdd(ip, False)
                 except:
                     # No region available in request
-                    logging.info("IP in Country WL, but no Region given to match Region WL")
+                    logging.info(f"{ip} BLOCK - in Country WL: {geo['country_code']}, \
+                            but no Region for IP (region restriction exists)")
                     return redisAdd(ip, False)
             else:
                 # No region limitation listed for Country, request OK
-                logging.info("IP in Country WL, No Region restriction")
+                logging.info(f"{ip} OK - in Country WL: {geo['country_code']}, No Region restriction")
                 return redisAdd(ip, True)
         else:
             # Country Code not in WL
-            logging.info("IP Country code not in Country WL")
+            logging.info(f"{ip} OK - Country code: {geo['country_code']} not in Geo WL")
             return redisAdd(ip, False)
 
     except:
         # Reject no country_code found, or problem with wl
-        logging.warning(f"Problem with WL file or {ip} has no Country Code!")
+        logging.warning(f"{ip} BLOCK - Problem with WL file or IP has no Country Code!")
         return redisAdd(ip, False)
 
 while True:
