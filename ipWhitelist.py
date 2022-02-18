@@ -7,6 +7,9 @@ import configparser
 import logging, logging.config
 import json
 import urllib.request, urllib.parse
+import aiohttp
+
+# https://realpython.com/async-io-python/#a-full-program-asynchronous-requests
 
 # TODO - For smaller installations, simplify without Redis?
 # TODO - add time element for whitelist (-1 forever, or 1 day for ex)
@@ -90,20 +93,20 @@ if wl_config['Geo'].values():
 
 print('Ready to go')
 
-async def app(scope, receive, send):
+async def run(scope, receive, send):
     assert scope['type'] == 'http'
     request = Request(scope, receive)
 
     xff = request.headers['x-forwarded-for']
-    decision = await checkIP(xff)
-
+    decision = checkIP(xff)
+    logging.debug(f"Decision passed as : {decision}")
     if decision == True:
         response = Response('OK', status_code=200, media_type='text/plain')
     else:
         response = Response('FORBIDDEN', status_code=403, media_type='text/plain')
     await response(scope, receive, send)
 
-async def getGeo(address):
+def getGeo(address):
     """Utilizes geojs.io which currently doesn't have any limits on it and is a
        public API. In the future I might add others as a round-robbin situation
        to reduce data sent to a single endpoint.
@@ -118,7 +121,7 @@ async def getGeo(address):
     rec = json.loads(data.read().decode())
     return rec
 
-async def checkIP(ip):
+def checkIP(ip):
     # Turn address into an address object
     try:
         ipObj = ipaddress.ip_address(ip)
@@ -138,9 +141,9 @@ async def checkIP(ip):
     # Continue into redis
     else:
         logging.debug(f"Pass {ipObj.compressed} request to redisQuery")
-        await redisQuery(ipObj)
+        return redisQuery(ipObj)
 
-async def redisQuery(ipObj):
+def redisQuery(ipObj):
     # Check if IP exists in redis
     if r.exists(ipObj.compressed):
         logging.debug(f"{ipObj.compressed} exists in Redis Cache")
@@ -156,9 +159,9 @@ async def redisQuery(ipObj):
     # If entry does not exist in cache, find IP information, create decision
     else:
         logging.debug(f"{ipObj.compressed} not in Redis Cache, pass to WL query")
-        await queryWhitelists(ipObj)
+        return queryWhitelists(ipObj)
 
-async def queryWhitelists(ipObj):
+def queryWhitelists(ipObj):
     # Check IP based whitelists
     if ipObj in wl_ip:
         logging.info(f"{ipObj.compressed} in WL_IP")
@@ -171,15 +174,15 @@ async def queryWhitelists(ipObj):
     # Try geographical WL
     else:
         try:
-            geo = await getGeo(ipObj.compressed)
+            geo = getGeo(ipObj.compressed)
             logging.debug(f"Geo info found: {geo}")
-            await geoQuery(geo, ipObj.compressed)
+            return geoQuery(geo, ipObj.compressed)
         except:
             # Unable to get geo info
             logging.error(f"{ipObj.compressed} BLOCK - Unable to get geo info for IP!")
             return redisAdd({ipObj.compressed}, False)
 
-async def geoQuery(geo, ip):
+def geoQuery(geo, ip):
     # If using a geo whitelist
     try:
         # Create subset of countries in WL (if fails, log parameter error)
