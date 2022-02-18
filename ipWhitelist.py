@@ -5,10 +5,11 @@ import redis
 import ipaddress
 import configparser
 import logging, logging.config
-import urllib.request, urllib.parse
+import urllib.parse
 from aiohttp import ClientSession
 import asyncio
 import uvicorn
+import datetime
 
 # TODO - For smaller installations, simplify without Redis?
 # TODO - add time element for whitelist (-1 forever, or 1 day for ex)
@@ -48,14 +49,13 @@ while not cache:
             r.ping()
             logging.info("Connected to Redis")
             logging.debug(f"Redis using: {config['Redis']['redis.host']}:{config['Redis']['redis.port']}")
-            cache = True
+            cache = "redis"
         except:
             logging.error("Redis unreachable, switching to internal cache")
             config['Redis']['redis'] = 'False'
     else:
-        # internal cache here
-        cache = True
-        pass
+        interal_cache = set()
+        cache = "internal"
 
 # Create whitelist (change to an async function with watchgod)
 wl_config = configparser.ConfigParser()
@@ -143,35 +143,58 @@ async def checkIP(ip):
     # Continue into redis
     else:
         logging.debug(f"Pass {ipObj.compressed} request to redisQuery")
-        return await redisQuery(ipObj)
+        return await cacheQuery(ipObj)
 
-async def redisQuery(ipObj):
-    # Check if IP exists in redis
-    if r.exists(ipObj.compressed):
-        logging.debug(f"{ipObj.compressed} exists in Redis Cache")
-        # If returns True, Send True(200 OK)
-        if r.get(ipObj.compressed) == b'True':
-            logging.debug(f"{ipObj.compressed} is TRUE in Redis Cache")
-            return True
-        # If returns False (or anything else), send False(403)
+async def cacheQuery(ipObj):
+    if cache == 'redis':
+        # Check if IP exists in redis
+        if r.exists(ipObj.compressed):
+            logging.debug(f"{ipObj.compressed} exists in Redis Cache")
+            # If returns True, Send True(200 OK)
+            if r.get(ipObj.compressed) == b'True':
+                logging.debug(f"{ipObj.compressed} is TRUE in Redis Cache")
+                return True
+            # If returns False (or anything else), send False(403)
+            else:
+                logging.info(f"{ipObj.compressed} is FALSE in Redis Cache")
+                return False
         else:
-            logging.info(f"{ipObj.compressed} is FALSE in Redis Cache")
-            return False
-
-    # If entry does not exist in cache, find IP information, create decision
+            logging.debug(f"{ipObj.compressed} not in Redis Cache, pass to WL query")
+            return await queryWhitelists(ipObj)
     else:
-        logging.debug(f"{ipObj.compressed} not in Redis Cache, pass to WL query")
-        return await queryWhitelists(ipObj)
+        match = [c for c in internal_cache if ipObj.compressed in c[0]]
+        if match:
+            now = datetime.datetime.now()
+            match = match[0]
+            logging.debug(f"{ipObj.compressed} exists in Internal Cache")
+            # Check if entry has expired
+            if match[1] > now:
+                internal_cache.remove(match)
+            else:
+                logging.debug(f"{ipObj.compressed} is {match[2]} in Internal Cache")
+                return match[2]
+            # If returns True, Send True(200 OK)
+            if r.get(ipObj.compressed) == b'True':
+                logging.debug(f"{ipObj.compressed} is TRUE in Redis Cache")
+                return True
+            # If returns False (or anything else), send False(403)
+            else:
+                logging.info(f"{ipObj.compressed} is FALSE in Redis Cache")
+                return False
+        # If entry does not exist in cache, find IP information, create decision
+        else:
+            logging.debug(f"{ipObj.compressed} not in Cache, pass to WL query")
+            return await queryWhitelists(ipObj)
 
 async def queryWhitelists(ipObj):
     # Check IP based whitelists
     if ipObj in wl_ip:
         logging.info(f"{ipObj.compressed} in WL_IP")
-        return redisAdd(ipObj.compressed, True)
+        return cacheAdd(ipObj.compressed, True)
 
     elif any(ipObj in rg for rg in wl_cidr):
                 logging.info(f"{ipObj.compressed} in WL_CIDR")
-                return redisAdd(ipObj.compressed, True)
+                return cacheAdd(ipObj.compressed, True)
 
     # Try geographical WL
     else:
@@ -182,7 +205,7 @@ async def queryWhitelists(ipObj):
         except:
             # Unable to get geo info
             logging.error(f"{ipObj.compressed} BLOCK - Unable to get geo info for IP!")
-            return redisAdd({ipObj.compressed}, False)
+            return cacheAdd({ipObj.compressed}, False)
 
 def geoQuery(geo, ip):
     # If using a geo whitelist
@@ -203,35 +226,47 @@ def geoQuery(geo, ip):
                     if geo['region'] in wl_region:
                         logging.info(f"{ip} OK - Region: {geo['region']} found in WL")
                         # Reqest region in WL
-                        return redisAdd(ip, True)
+                        return cacheAdd(ip, True)
                     else:
                         # Request region not in WL
                         logging.info(f"{ip} BLOCK - in Country WL: {geo['country_code']} but {geo['region']} not in WL")
-                        return redisAdd(ip, False)
+                        return cacheAdd(ip, False)
                 except:
                     # No region available in request
                     logging.info(f"{ip} BLOCK - in Country WL: {geo['country_code']}, but no Region for IP (region restriction exists)")
-                    return redisAdd(ip, False)
+                    return cacheAdd(ip, False)
             else:
                 # No region limitation listed for Country, request OK
                 logging.info(f"{ip} OK - in Country WL: {geo['country_code']}, No Region restriction")
-                return redisAdd(ip, True)
+                return cacheAdd(ip, True)
         else:
             # Country Code not in WL
             logging.info(f"{ip} BLOCK - Country code: {geo['country_code']} not in Geo WL")
-            return redisAdd(ip, False)
+            return cacheAdd(ip, False)
 
     except:
         # Reject no country_code found, or problem with wl
         logging.warning(f"{ip} BLOCK - Problem with WL file or IP has no Country Code!")
-        return redisAdd(ip, False)
+        return cacheAdd(ip, False)
 
-def redisAdd(ip, decision):
-    if decision == True:
-        logging.info(f"IP {ip} Whitelisted, adding to Redis Cache")
-        r.setex(ip, expiry, 'True')
-        return True
+def cacheAdd(ip, decision):
+    if cache == "redis":
+        if decision == True:
+            logging.info(f"IP {ip} Whitelisted, adding to Redis Cache")
+            r.setex(ip, expiry, 'True')
+            return True
+        else:
+            logging.info(f"IP {ip} Blacklisted, adding to Redis Cache")
+            r.setex(ip, expiry, 'False')
+            return False
     else:
-        logging.info(f"IP {ip} Blacklisted, adding to Redis Cache")
-        r.setex(ip, expiry, 'False')
-        return False
+        now = datetime.datetime.now()
+        exp = now + datetime.timedelta(seconds=+expiry)
+        if decision == True:
+            interal_cache.add((ip, exp, 'True'))
+            logging.info(f"IP {ip} Whitelisted, added to Internal Cache")
+            return True
+        else:
+            logging.info(f"IP {ip} Blacklisted, adding to Internal Cache")
+            internal_cache.add((ip, exp, 'False'))
+            return False
