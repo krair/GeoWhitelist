@@ -5,11 +5,10 @@ import redis
 import ipaddress
 import configparser
 import logging, logging.config
-import json
 import urllib.request, urllib.parse
-import aiohttp
-
-# https://realpython.com/async-io-python/#a-full-program-asynchronous-requests
+from aiohttp import ClientSession
+import asyncio
+import uvicorn
 
 # TODO - For smaller installations, simplify without Redis?
 # TODO - add time element for whitelist (-1 forever, or 1 day for ex)
@@ -22,13 +21,15 @@ import aiohttp
 
 # TODO - LATER -If no 'region' given in response, do a GMaps API call with lat/lon
 
-# setup
 config = configparser.ConfigParser()
 with open('./config/config.ini','r') as config_file:
     config.read_file(config_file)
 
 # Default 3h window to keep in Redis
 expiry = config['Default']['cache.expiry']
+#host = config['Default']['host']
+#port = config['Default']['port']
+#workers = config['Default']['workers']
 
 # Set Logging config
 logging.config.fileConfig(config)
@@ -93,12 +94,12 @@ if wl_config['Geo'].values():
 
 print('Ready to go')
 
-async def run(scope, receive, send):
+async def app(scope, receive, send):
     assert scope['type'] == 'http'
     request = Request(scope, receive)
 
     xff = request.headers['x-forwarded-for']
-    decision = checkIP(xff)
+    decision = await checkIP(xff)
     logging.debug(f"Decision passed as : {decision}")
     if decision == True:
         response = Response('OK', status_code=200, media_type='text/plain')
@@ -106,7 +107,7 @@ async def run(scope, receive, send):
         response = Response('FORBIDDEN', status_code=403, media_type='text/plain')
     await response(scope, receive, send)
 
-def getGeo(address):
+async def getGeo(address):
     """Utilizes geojs.io which currently doesn't have any limits on it and is a
        public API. In the future I might add others as a round-robbin situation
        to reduce data sent to a single endpoint.
@@ -115,13 +116,14 @@ def getGeo(address):
     serviceURL = "https://get.geojs.io/v1/ip/geo/"
     # Encode ip (especially v6) into url
     url = serviceURL + urllib.parse.quote(address)
-    # Grab data from URL
-    data = urllib.request.urlopen(url)
-    # Turn the data into a json (dict)
-    rec = json.loads(data.read().decode())
-    return rec
 
-def checkIP(ip):
+    async with ClientSession() as session:
+        async with session.get(url) as response:
+
+            html = await response.json()
+    return html
+
+async def checkIP(ip):
     # Turn address into an address object
     try:
         ipObj = ipaddress.ip_address(ip)
@@ -141,9 +143,9 @@ def checkIP(ip):
     # Continue into redis
     else:
         logging.debug(f"Pass {ipObj.compressed} request to redisQuery")
-        return redisQuery(ipObj)
+        return await redisQuery(ipObj)
 
-def redisQuery(ipObj):
+async def redisQuery(ipObj):
     # Check if IP exists in redis
     if r.exists(ipObj.compressed):
         logging.debug(f"{ipObj.compressed} exists in Redis Cache")
@@ -159,9 +161,9 @@ def redisQuery(ipObj):
     # If entry does not exist in cache, find IP information, create decision
     else:
         logging.debug(f"{ipObj.compressed} not in Redis Cache, pass to WL query")
-        return queryWhitelists(ipObj)
+        return await queryWhitelists(ipObj)
 
-def queryWhitelists(ipObj):
+async def queryWhitelists(ipObj):
     # Check IP based whitelists
     if ipObj in wl_ip:
         logging.info(f"{ipObj.compressed} in WL_IP")
@@ -174,7 +176,7 @@ def queryWhitelists(ipObj):
     # Try geographical WL
     else:
         try:
-            geo = getGeo(ipObj.compressed)
+            geo = await getGeo(ipObj.compressed)
             logging.debug(f"Geo info found: {geo}")
             return geoQuery(geo, ipObj.compressed)
         except:
@@ -216,7 +218,7 @@ def geoQuery(geo, ip):
                 return redisAdd(ip, True)
         else:
             # Country Code not in WL
-            logging.info(f"{ip} OK - Country code: {geo['country_code']} not in Geo WL")
+            logging.info(f"{ip} BLOCK - Country code: {geo['country_code']} not in Geo WL")
             return redisAdd(ip, False)
 
     except:
