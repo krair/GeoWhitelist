@@ -80,7 +80,7 @@ if wl_config['IP'].values():
 
 if wl_config['Geo'].values():
     # Pull values out of configparser
-    wl_config_geo = [v.split() for v in wl_config['Geo'].values()][0]
+    wl_config_geo = [v.split('\n') for v in wl_config['Geo'].values()][0]
     try:
         # Countries with region set
         wl_geo = set([tuple(i.split('/')) for i in wl_config_geo if '/' in i])

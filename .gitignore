@@ -1,3 +1,2 @@
-__pycache__/
-dev/
-*config/
+__pycache__
+dev
