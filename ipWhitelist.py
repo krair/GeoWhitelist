@@ -11,25 +11,14 @@ import asyncio
 import uvicorn
 import datetime
 
-# TODO - add time element for whitelist (-1 forever, or 1 day for ex)
-
-# TODO - What do use to avoid a buildup of queries overloading the system?
-# TODO - If a big whitelist of IP's, load into redis beforehand? Persistent?
-# TODO - prevent IP spoofing?
-# TODO - add reason for WL/Ban to redis entry?
-# TODO - check that at least 1 WL is available (maybe a file error or otherwise)
-
-# TODO - LATER -If no 'region' given in response, do a GMaps API call with lat/lon
-
 config = configparser.ConfigParser()
 with open('./config/config.ini','r') as config_file:
     config.read_file(config_file)
 
 # Default 3h window to keep in Redis
 expiry = int(config['Default']['cache.expiry'])
-#host = config['Default']['host']
-#port = config['Default']['port']
-#workers = config['Default']['workers']
+# Use a different endpoint if you like
+serviceURL = config['GeoLookup']['serviceurl']
 
 # Set Logging config
 logging.config.fileConfig(config)
@@ -252,8 +241,6 @@ async def getGeo(address):
        public API. In the future I might add others as a round-robbin situation
        to reduce data sent to a single endpoint.
     """
-    # Use a different endpoint if you like
-    serviceURL = "https://get.geojs.io/v1/ip/geo/"
     # Encode ip (especially v6) into url
     url = serviceURL + urllib.parse.quote(address)
 
