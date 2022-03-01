@@ -11,7 +11,6 @@ import asyncio
 import uvicorn
 import datetime
 
-# TODO - For smaller installations, simplify without Redis?
 # TODO - add time element for whitelist (-1 forever, or 1 day for ex)
 
 # TODO - What do use to avoid a buildup of queries overloading the system?
@@ -27,7 +26,7 @@ with open('./config/config.ini','r') as config_file:
     config.read_file(config_file)
 
 # Default 3h window to keep in Redis
-expiry = config['Default']['cache.expiry']
+expiry = int(config['Default']['cache.expiry'])
 #host = config['Default']['host']
 #port = config['Default']['port']
 #workers = config['Default']['workers']
@@ -54,8 +53,9 @@ while not cache:
             logging.error("Redis unreachable, switching to internal cache")
             config['Redis']['redis'] = 'False'
     else:
-        interal_cache = set()
+        internal_cache = set()
         cache = "internal"
+        logging.info("Internal Cache set")
 
 # Create whitelist (change to an async function with watchgod)
 wl_config = configparser.ConfigParser()
@@ -91,6 +91,9 @@ if wl_config['Geo'].values():
         logging.debug(f"Geo whitelist created: {wl_geo}")
     except:
         logging.error("Problem with Geo whitelist config!")
+    # Create subset of countries in WL
+    wl_country = {i[0] for i in wl_geo}
+    logging.debug(f"Countries in WL: {wl_country}")
 
 print('Ready to go')
 
@@ -106,22 +109,6 @@ async def app(scope, receive, send):
     else:
         response = Response('FORBIDDEN', status_code=403, media_type='text/plain')
     await response(scope, receive, send)
-
-async def getGeo(address):
-    """Utilizes geojs.io which currently doesn't have any limits on it and is a
-       public API. In the future I might add others as a round-robbin situation
-       to reduce data sent to a single endpoint.
-    """
-    # Use a different endpoint if you like
-    serviceURL = "https://get.geojs.io/v1/ip/geo/"
-    # Encode ip (especially v6) into url
-    url = serviceURL + urllib.parse.quote(address)
-
-    async with ClientSession() as session:
-        async with session.get(url) as response:
-
-            html = await response.json()
-    return html
 
 async def checkIP(ip):
     # Turn address into an address object
@@ -140,85 +127,96 @@ async def checkIP(ip):
     elif ipObj.is_unspecified or ipObj.is_multicast:
         logging.info(f"{ipObj.compressed} BLOCK - unspecified or multicast")
         return False
-    # Continue into redis
+    # Continue into cache
     else:
-        logging.debug(f"Pass {ipObj.compressed} request to redisQuery")
-        return await cacheQuery(ipObj)
+        logging.debug(f"Pass {ipObj.compressed} request to accessControl")
+        return await accessControl(ipObj)
 
-async def cacheQuery(ipObj):
+async def accessControl(ipObj):
+    # try IP whitelist (esp for CIDR ranges)
+    if await queryIPWL(ipObj):
+        return True
+    # Not in IP WL's, move to cache
+    logging.debug(f"{ipObj.compressed} passed to {cache} cache")
+    # cache query (redis)
     if cache == 'redis':
-        # Check if IP exists in redis
-        if r.exists(ipObj.compressed):
-            logging.debug(f"{ipObj.compressed} exists in Redis Cache")
-            # If returns True, Send True(200 OK)
-            if r.get(ipObj.compressed) == b'True':
-                logging.debug(f"{ipObj.compressed} is TRUE in Redis Cache")
-                return True
-            # If returns False (or anything else), send False(403)
-            else:
-                logging.info(f"{ipObj.compressed} is FALSE in Redis Cache")
-                return False
-        else:
-            logging.debug(f"{ipObj.compressed} not in Redis Cache, pass to WL query")
-            return await queryWhitelists(ipObj)
+        rq = await redisQuery(ipObj.compressed)
+        if rq is not None:
+            return rq
+    # cache query (internal)
     else:
-        match = [c for c in internal_cache if ipObj.compressed in c[0]]
-        if match:
-            now = datetime.datetime.now()
-            match = match[0]
-            logging.debug(f"{ipObj.compressed} exists in Internal Cache")
-            # Check if entry has expired
-            if match[1] > now:
-                internal_cache.remove(match)
-            else:
-                logging.debug(f"{ipObj.compressed} is {match[2]} in Internal Cache")
-                return match[2]
-            # If returns True, Send True(200 OK)
-            if r.get(ipObj.compressed) == b'True':
-                logging.debug(f"{ipObj.compressed} is TRUE in Redis Cache")
-                return True
-            # If returns False (or anything else), send False(403)
-            else:
-                logging.info(f"{ipObj.compressed} is FALSE in Redis Cache")
-                return False
-        # If entry does not exist in cache, find IP information, create decision
-        else:
-            logging.debug(f"{ipObj.compressed} not in Cache, pass to WL query")
-            return await queryWhitelists(ipObj)
+        iq = await internalQuery(ipObj.compressed)
+        if iq is not None:
+            return iq
+    # geo query
+    return await geoQuery(ipObj.compressed)
 
-async def queryWhitelists(ipObj):
-    # Check IP based whitelists
+async def queryIPWL(ipObj):
+    # Check if IP in IP WL
     if ipObj in wl_ip:
         logging.info(f"{ipObj.compressed} in WL_IP")
-        return cacheAdd(ipObj.compressed, True)
-
+        return True
+    # Check if IP in CIDR range WL
     elif any(ipObj in rg for rg in wl_cidr):
-                logging.info(f"{ipObj.compressed} in WL_CIDR")
-                return cacheAdd(ipObj.compressed, True)
-
-    # Try geographical WL
+        logging.info(f"{ipObj.compressed} in WL_CIDR")
+        return True
+    # IP Not in either WL, pass along
     else:
-        try:
-            geo = await getGeo(ipObj.compressed)
-            logging.debug(f"Geo info found: {geo}")
-            return geoQuery(geo, ipObj.compressed)
-        except:
-            # Unable to get geo info
-            logging.error(f"{ipObj.compressed} BLOCK - Unable to get geo info for IP!")
-            return cacheAdd({ipObj.compressed}, False)
+        logging.info(f"{ipObj.compressed} not found in IP WL's")
+        return False
 
-def geoQuery(geo, ip):
+async def redisQuery(ip):
+    # If returns True, Send True(200 OK)
+    if r.get(ip) == b'True':
+        logging.debug(f"{ip} is TRUE in Redis Cache")
+        return True
+    # If returns False, send False(403)
+    elif r.get(ip) == b'False':
+        logging.info(f"{ip} is FALSE in Redis Cache")
+        return False
+    else:
+        logging.debug(f"{ip} not in Redis Cache")
+        return None
+
+async def internalQuery(ip):
+    match = [c for c in internal_cache if ip in c[0]]
+    if match:
+        logging.debug(f"{ip} exists in Internal Cache")
+        # Pull tuple out of list comprehension from above
+        match = match[0]
+        # Check if entry has expired
+        now = datetime.datetime.now()
+        # If expiration is later than now, return True/False value
+        if match[1] > now:
+            logging.debug(f"{ip} is {match[2]} in Internal Cache")
+            return match[2]
+        # If expiration is less than or equal to now, remove from cache
+        else:
+            logging.debug(f"{ip} expired at: {match[1].ctime()}")
+            internal_cache.remove(match)
+            return None
+    # If entry does not exist in cache, pass along
+    else:
+        logging.debug(f"{ip} not in Internal Cache")
+        return None
+
+async def geoQuery(ip):
+    try:
+        # Get geo dict
+        geo = await getGeo(ip)
+        logging.debug(f"Geo info found: {geo}")
+    except:
+        # Unable to get geo info
+        logging.error(f"{ip} BLOCK - Unable to get geo info for IP!")
+        return cacheAdd(ip, False)
     # If using a geo whitelist
     try:
-        # Create subset of countries in WL (if fails, log parameter error)
-        wl_country = {i[0] for i in wl_geo}
-        logging.debug(f"Countries in WL: {wl_country}")
         # Check if ip in country WL
         if geo['country_code'] in wl_country:
             logging.debug(f"Country Code: {geo['country_code']} found in WL")
-            # Create subset of regions in WL
+            # Create subset of regions for given country in WL
             wl_region = {i[1] for i in wl_geo if i[0] == geo['country_code'] and i[1] != None}
-            logging.debug(f"Regions in WL: {wl_region}")
+            logging.debug(f"Regions for {geo['country_code']} in WL: {wl_region}")
             # Check if the country we are checking has a region limitation
             if wl_region:
                 try:
@@ -246,8 +244,23 @@ def geoQuery(geo, ip):
 
     except:
         # Reject no country_code found, or problem with wl
-        logging.warning(f"{ip} BLOCK - Problem with WL file or IP has no Country Code!")
+        logging.warning(f"{ip} BLOCK - Problem with Geo WL or IP has no Country Code!")
         return cacheAdd(ip, False)
+
+async def getGeo(address):
+    """Utilizes geojs.io which currently doesn't have any limits on it and is a
+       public API. In the future I might add others as a round-robbin situation
+       to reduce data sent to a single endpoint.
+    """
+    # Use a different endpoint if you like
+    serviceURL = "https://get.geojs.io/v1/ip/geo/"
+    # Encode ip (especially v6) into url
+    url = serviceURL + urllib.parse.quote(address)
+
+    async with ClientSession() as session:
+        async with session.get(url) as response:
+            html = await response.json()
+    return html
 
 def cacheAdd(ip, decision):
     if cache == "redis":
@@ -263,10 +276,10 @@ def cacheAdd(ip, decision):
         now = datetime.datetime.now()
         exp = now + datetime.timedelta(seconds=+expiry)
         if decision == True:
-            interal_cache.add((ip, exp, 'True'))
+            internal_cache.add((ip, exp, True))
             logging.info(f"IP {ip} Whitelisted, added to Internal Cache")
             return True
         else:
+            internal_cache.add((ip, exp, False))
             logging.info(f"IP {ip} Blacklisted, adding to Internal Cache")
-            internal_cache.add((ip, exp, 'False'))
             return False
