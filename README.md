@@ -1,18 +1,22 @@
 # GeoWhitelist middleware for Traefik
 
-Traefik ForwardAuth middleware utilizing GeoJS.io to whitelist IP's based upon geolocation.
+Traefik ForwardAuth middleware utilizing [GeoJS.io](https://www.geojs.io/) to whitelist IP's based upon geolocation.
+
+## This software **has not** been battle-tested, scrutinized, audited, or checked for vulnerabilities in any way. Use **at your own risk**! I take no responsibility for someone bypassing this simple location-based fence.
 
 ## Overview
 
-A small python program that utilizes a user-defined whitelist of IP's and/or locations. As IP's attempt to connect to your server, GeoWhitelist can be run as a forwardAuth middleware to authorize or block requests based upon IP or geolocation.
+A small python program that utilizes a user-defined whitelist of countries or country/regions. As IP's attempt to connect to your server, GeoWhitelist can be run as a `forwardAuth` middleware alongside Traefik to authorize or block requests based upon or geolocation or source IP.
 
 When a device attempts to connect, the `X-Forward-For` header will be passed from Traefik to this middleware. The IP is checked against 3 filters:
 
 - Is the IP a legit IP, loopback, link local, not unspecified, or not multicast?
-- Does the IP appear in the provided IP whitelist?
 - Does the IP appear in the geographical whitelist?
+- Does the IP appear in the provided IP whitelist?
 
-If yes to any of the above, the middlware returns a `status 200 - OK` code. Otherwise it returns a `status 403 - FORBIDDEN` code. Eventually, the codes could be customized for easier integration with tools like `fail2ban`. Currently you could have `fail2ban` use the Traefik access log to find the `403` codes and ban those as you please.
+If yes to any of the above, the middlware returns a `status 200 - OK` code, allowing the remote to connect. Otherwise it returns a `status 403 - FORBIDDEN` code, blocking the request and future requests for a period of time. Eventually, the codes could be customized for easier integration with tools like `fail2ban`. Currently you could have `fail2ban` use the Traefik access log to find the `403` codes and ban those as you please.
+
+To hide a service, you could instead return a `404 - Not Found` code.
 
 The decision is stored in either a local cache (non-persistent) or a Redis cache. The default cache time is 3h and can be customized.
 
@@ -76,7 +80,7 @@ https://bartsimons.me/gunicorn-as-a-systemd-service/
 
 Generally preferred, and if you are running Traefik via docker/podman anyways, this method is quite easy but will require you to build the container yourself.
 
-**CRITICAL:** If you are running rootless podman, ensure that you are able to get the actual remote address from Traefik and not simply a `10.0.2.100` address. See below for workaround.
+**CRITICAL:** If you are running rootless podman, ensure that you are able to get the actual remote address from Traefik and not simply a `10.0.2.100` address. [See below for workaround](#notes-for-podman).
 
 1. Clone this repository:
 ```
@@ -111,7 +115,7 @@ services:
 ...
 ```
 
-**Note:** The above are rough examples and you will have to adjust accordingly, especially for Podman.
+**Note:** The above are rough examples and you will have to adjust accordingly, especially for [Podman](#notes-for-podman).
 
 ## Connect to Traefik
 
@@ -187,3 +191,85 @@ Recently Podman 4.0 was released with a new network stack. I have yet to test th
 ### Pod-to-pod access
 
 I would recommend running the GeoWhitelist middleware in the same pod as Traefik for simplicity. If you *DO* decide to run in a separate pod, bind it to a local address. For example, create a `dummy` loopback interface bound to an internal address (like `10.254.254.1` for example), and bind your pod to that address. Access it via Traefik using the `10.254.254.1:9500` address.
+
+## Whitelist Usage
+
+### Usage
+
+#### Geolocation
+
+Open your `whitelist.ini` file. Under the `[Geo]` heading there are some examples of how to list locations. Use a new line for each location. To add a whole country, use the [two letter ISO country code](https://www.iso.org/obp/ui/#search) like:
+```
+DE
+```
+
+To add a specific region within a country:
+```
+FR/Hauts-de-France
+```
+This can be used multiple times to list more than one region:
+```
+FR/Hauts-de-France
+FR/Île-de-France
+```
+
+**Note:** The slash between the country code and the region are critical, as the program splits the line on the `/` instead of a space. This allows us to use region names like `New York`.
+
+If you are unsure of the region name, spelling, etc., it must match the results from [GeoJS.io](https://www.geojs.io/). To check, send a request with the desired IP and have a look at the result. For example with `9.9.9.9`:
+```
+curl -Ls https://get.geojs.io/v1/ip/geo/9.9.9.9 | tr ',' '\n' | grep region | cut -d ':' -f 2
+```
+output:
+```
+"California"
+```
+
+##### What if there's no output??
+
+This means there's no region attached to the IP address. See the [Concept](#concept) section below.
+
+#### IP
+
+While this section is a bit repetitive and mimics the [ipWhitelist](https://doc.traefik.io/traefik/middlewares/http/ipwhitelist/) middleware already provided by Traefik, the inclusion was fairly trivial so I added it anyways. I may end up removing it later to simplify the code and just focus on the geolocation feature.
+
+To include an IP, simply add it to your `whitelist.ini` file under the `[IP]` section:
+```
+192.168.1.14
+```
+
+To include a range of IP's, CIDR notation can be used:
+```
+10.11.12.0/24
+```
+
+### Concept
+There's still a fair amount of testing I would have to do for more complete documentation for this. But the general concept is that when an IP is sent to the GeoJS endpoint, we have a few fields we can use as filters in our whitelist.
+
+For example, if I ask for details on `9.9.9.9`:
+```
+curl -L https://get.geojs.io/v1/ip/geo/9.9.9.9
+```
+output:
+```
+{"organization_name":"QUAD9-AS-1","region":"California","accuracy":100,"asn":19281,"organization":"AS19281 QUAD9-AS-1","timezone":"America\/Los_Angeles","longitude":"-122.2676","country_code3":"USA","area_code":"0","ip":"9.9.9.9","city":"Berkeley","country":"United States","continent_code":"NA","country_code":"US","latitude":"37.8767"}
+```
+
+For now, I have only implemented `country_code` and an optional `region` to the filter. Not all addresses give the region in their response:
+```
+curl -L https://get.geojs.io/v1/ip/geo/8.8.8.8
+```
+output:
+```
+{"organization_name":"GOOGLE","accuracy":1000,"asn":15169,"organization":"AS15169 GOOGLE","timezone":"America\/Chicago","longitude":"-97.822","country_code3":"USA","area_code":"0","ip":"8.8.8.8","country":"United States","continent_code":"NA","country_code":"US","latitude":"37.751"}
+```
+
+Therefore, by adding `US/Californa` to our whitelist, would allow `9.9.9.9` and deny `8.8.8.8` from connecting to the server as we have created a restriction for regions. However, if we simply add `US` with no region behind, both would be allowed to connect.
+
+Thus GeoWhitelist is not a perfect solution, but if you are trying to protect a specific service behind Traefik, we generally know where we *want* the access coming from. Most home internet users will have a fairly accurate location attached to their IP.
+
+Can someone get around this by using a VPN masking their IP? Absolutely. This is not meant to be a "silver bullet" for security, just an added layer to remove requests from obvious script kiddies and scanners.
+
+## Support
+
+Any support is appreciated:
+[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/A0A74AJX7)
