@@ -2,7 +2,7 @@
 
 Traefik ForwardAuth middleware utilizing [GeoJS.io](https://www.geojs.io/) to whitelist IP's based upon geolocation.
 
-## This software **has not** been battle-tested, scrutinized, audited, or checked for vulnerabilities in any way. Use **at your own risk**! I take no responsibility for someone bypassing this simple location-based fence.
+## This software *has not* been battle-tested, scrutinized, audited, or checked for vulnerabilities in any way. Use *at your own risk*! I take no responsibility for someone bypassing this simple location-based fence.
 
 ## Overview
 
