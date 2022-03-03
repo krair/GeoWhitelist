@@ -8,7 +8,7 @@ import logging, logging.config
 import urllib.parse
 from aiohttp import ClientSession
 import asyncio
-import uvicorn
+#import uvicorn
 import datetime
 
 config = configparser.ConfigParser()
