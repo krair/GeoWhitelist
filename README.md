@@ -14,7 +14,7 @@ When a device attempts to connect, the `X-Forward-For` header will be passed fro
 - Does the IP appear in the geographical whitelist?
 - Does the IP appear in the provided IP whitelist?
 
-If yes to any of the above, the middlware returns a `status 200 - OK` code, allowing the remote to connect. Otherwise it returns a `status 403 - FORBIDDEN` code, blocking the request and future requests for a period of time. Eventually, the codes could be customized for easier integration with tools like `fail2ban`. Currently you could have `fail2ban` use the Traefik access log to find the `403` codes and ban those as you please.
+If the answer is yes to the first question, and any of the following two above, the middlware returns a `status 200 - OK` code, allowing the remote to connect. Otherwise it returns a `status 403 - FORBIDDEN` code, blocking the request and future requests for a period of time. Eventually, the codes could be customized for easier integration with tools like `fail2ban`. Currently you could have `fail2ban` use the Traefik access log to find the `403` codes and ban those as you please.
 
 To hide a service, you could instead return a `404 - Not Found` code.
 
@@ -24,10 +24,10 @@ If the IP is passed to the geographical lookup, there will be a small delay duri
 
 ## Prerequisites
 
-- Linux server (tested on CentOS Stream 8, Fedora 35, Ubuntu 20.04)
+- Linux server (tested on AlmaLinux 9, Fedora 35+, Ubuntu 20.04)
 - Traefik (tested with 2.5+)
 - Python3 (tested with 3.6.8+)
-- (optional) docker/podman (tested with podman v3.4.1 and v3.4.4)
+- (optional) docker/podman (tested with podman v3.4.1+)
 - (optional) Redis (tested with v6.2)
 
 The app can run with Redis as a caching backend or using an internal Python cache. I haven't done enough extensive testing to see how the performance changes, but generally speaking, Redis is a more robust cache system. For testing or very small deployments, the internal cache should suffice.
@@ -36,7 +36,7 @@ The app can run with Redis as a caching backend or using an internal Python cach
 
 ### Redis
 
-If you decide to use a Redis instance, make sure to modify the `config.ini` file to match your Redis settings.
+If you decide to use a Redis instance, make sure to modify the `config.yaml` file to match your Redis settings.
 
 **Note:** I haven't implemented the password setting for Redis yet as I only access it locally.
 
@@ -54,7 +54,7 @@ git clone https://github.com/krair/GeoWhitelist
 ```
 python3 -m pip install -r requirements.txt
 ```
-3. Edit the `config/config.ini` and `config/whitelist.ini` files to your liking.
+3. Edit the `config/config.yaml` and `config/whitelist.yaml` files to your liking.
 
 4. Run with `gunicorn`:
 ```
@@ -86,7 +86,7 @@ Generally preferred, and if you are running Traefik via docker/podman anyways, t
 ```
 git clone https://github.com/krair/GeoWhitelist
 ```
-2. Edit the `config/config.ini` and `config/whitelist.ini` files to your liking.
+2. Edit the `config/config.yaml` and `config/whitelist.yaml` files to your liking.
 
 3. Build the container:
 ```
@@ -186,7 +186,9 @@ services:
 ### Slirp4netns port handler
 If running rootless, the Traefik container must be started with the `--net=slirp4netns:port_handler=slirp4netns` option. If this is not used, it will appear to Traefik (and hence the GeoWhitelist container) that all requests are coming from the local address `10.0.2.100`. [This GitHub question explains some of it](https://github.com/containers/podman/discussions/10472).
 
-Recently Podman 4.0 was released with a new network stack. I have yet to test this.
+### Pasta network backend
+
+As of Podman version [4.4.0](https://github.com/containers/podman/releases/tag/v4.4.0), a new network backend known as 'pasta' is now available which gives the correct originating address, and is more performant that the older Slirp4netns backend listed above. I highly recommend using it if you run your containers in a rootless environment.
 
 ### Pod-to-pod access
 
@@ -198,7 +200,7 @@ I would recommend running the GeoWhitelist middleware in the same pod as Traefik
 
 #### Geolocation
 
-Open your `whitelist.ini` file. Under the `[Geo]` heading there are some examples of how to list locations. Use a new line for each location. To add a whole country, use the [two letter ISO country code](https://www.iso.org/obp/ui/#search) like:
+Open your `whitelist.yaml` file. Under the `[Geo]` heading there are some examples of how to list locations. Use a new line for each location. To add a whole country, use the [two letter ISO country code](https://www.iso.org/obp/ui/#search) like:
 ```
 DE
 ```
@@ -232,7 +234,7 @@ This means there's no region attached to the IP address. See the [Concept](#conc
 
 While this section is a bit repetitive and mimics the [ipWhitelist](https://doc.traefik.io/traefik/middlewares/http/ipwhitelist/) middleware already provided by Traefik, the inclusion was fairly trivial so I added it anyways. I may end up removing it later to simplify the code and just focus on the geolocation feature.
 
-To include an IP, simply add it to your `whitelist.ini` file under the `[IP]` section:
+To include an IP, simply add it to your `whitelist.yaml` file under the `[IP]` section:
 ```
 192.168.1.14
 ```
