@@ -3,61 +3,59 @@ from starlette.responses import Response
 
 import redis
 import ipaddress
-import configparser
 import logging, logging.config
 import urllib.parse
 from aiohttp import ClientSession
 import asyncio
-#import uvicorn
 import datetime
+import yaml
 
-config = configparser.ConfigParser()
-with open('./config/config.ini','r') as config_file:
-    config.read_file(config_file)
+with open('./config/config.yaml','r') as config_file:
+    config = yaml.safe_load(config_file)
 
 # Default 3h window to keep in Redis
-expiry = int(config['Default']['cache.expiry'])
+expiry = int(config.get('cache_expiry', 10800))
 # Use a different endpoint if you like
-serviceURL = config['GeoLookup']['serviceurl']
+serviceURL = config.get('service_url')
 
 # Set Logging config
-logging.config.fileConfig(config)
+logging.config.fileConfig(config.get('logging'))
 
 # Setup cache
 cache = False
 while not cache:
     # Setup Redis cache
-    if config['Redis'].getboolean('redis'):
-        r = redis.Redis(host=config['Redis']['redis.host'], \
-                    port=config['Redis']['redis.port'], \
-                    db=config['Redis']['redis.db'], \
-#                    password=config['Redis']['redis.password'], \
+    redis_config = config.get('redis')
+    if (redis_config and redis_config.get('enabled', False)):
+        r = redis.Redis(host=redis_config.get('host', 127.0.0.1), \
+                    port=redis_config.get('port', 6379), \
+                    db=redis_config.get('db',0), \
+#                    password=redis_config('password'), \
                     socket_timeout=None)
         try:
             r.ping()
             logging.info("Connected to Redis")
-            logging.debug(f"Redis using: {config['Redis']['redis.host']}:{config['Redis']['redis.port']}")
+            logging.debug(f"Redis using: {redis_config.get('host')}:{redis_config.get('port')}")
             cache = "redis"
         except:
             logging.error("Redis unreachable, switching to internal cache")
-            config['Redis']['redis'] = 'False'
+            config['redis']['enabled'] = False
     else:
         internal_cache = set()
         cache = "internal"
         logging.info("Internal Cache set")
 
 # Create whitelist (change to an async function with watchgod)
-wl_config = configparser.ConfigParser()
-with open('./config/whitelist.ini','r') as config_file:
-    wl_config.read_file(config_file)
+with open('./config/whitelist.yaml','r') as f:
+    wl_config = yaml.safe_load(f)
 
 wl_ip = set()
 wl_cidr = list()
 wl_geo = set()
 
-if wl_config['IP'].values():
-    wl_config_ip = [v.split() for v in wl_config['IP'].values()][0]
-    for i in wl_config_ip:
+wl_ip_config = wl_config.get('ip')
+if wl_ip_config:
+    for i in wl_ip_config:
         try:
             if '/' in i:
                 wl_cidr.append(ipaddress.ip_network(i))
@@ -67,14 +65,13 @@ if wl_config['IP'].values():
             logging.warning(f"IP address {i} in whitelist is not valid, skipping")
     logging.debug(f"IP_WL created: \nCIDR:{wl_cidr}\nIP:{wl_ip}")
 
-if wl_config['Geo'].values():
-    # Pull values out of configparser
-    wl_config_geo = [v.split('\n') for v in wl_config['Geo'].values()][0]
+wl_geo_config = wl_config.get('geo')
+if wl_geo_config:
     try:
         # Countries with region set
-        wl_geo = set([tuple(i.split('/')) for i in wl_config_geo if '/' in i])
+        wl_geo = set([tuple(i.split('/')) for i in wl_geo_config if '/' in i])
         # Countries with no region set
-        o = set([(i,None) for i in wl_config_geo if '/' not in i])
+        o = set([(i,None) for i in wl_geo_config if '/' not in i])
         # Combine sets
         wl_geo.update(o)
         logging.debug(f"Geo whitelist created: {wl_geo}")

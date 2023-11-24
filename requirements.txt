@@ -1,5 +1,5 @@
 redis
 starlette
 aiohttp
-uvicorn
 gunicorn
+pyyaml
