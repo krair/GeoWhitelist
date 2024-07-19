@@ -28,7 +28,7 @@ while not cache:
     # Setup Redis cache
     redis_config = config.get('redis')
     if (redis_config and redis_config.get('enabled', False)):
-        r = redis.Redis(host=redis_config.get('host', 127.0.0.1),
+        r = redis.Redis(host=redis_config.get('host', '127.0.0.1'),
                         port=redis_config.get('port', 6379),
                         db=redis_config.get('db', 0),
                         socket_timeout=None)
