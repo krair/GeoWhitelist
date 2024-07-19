@@ -3,14 +3,15 @@ from starlette.responses import Response
 
 import redis
 import ipaddress
-import logging, logging.config
+import logging
+import logging.config
 import urllib.parse
 from aiohttp import ClientSession
 import asyncio
 import datetime
 import yaml
 
-with open('./config/config.yaml','r') as config_file:
+with open('./config/config.yaml', 'r') as config_file:
     config = yaml.safe_load(config_file)
 
 # Default 3h window to keep in Redis
@@ -27,17 +28,17 @@ while not cache:
     # Setup Redis cache
     redis_config = config.get('redis')
     if (redis_config and redis_config.get('enabled', False)):
-        r = redis.Redis(host=redis_config.get('host', 127.0.0.1), \
-                    port=redis_config.get('port', 6379), \
-                    db=redis_config.get('db',0), \
-#                    password=redis_config('password'), \
-                    socket_timeout=None)
+        r = redis.Redis(host=redis_config.get('host', 127.0.0.1),
+                        port=redis_config.get('port', 6379),
+                        db=redis_config.get('db', 0),
+                        socket_timeout=None)
         try:
             r.ping()
             logging.info("Connected to Redis")
-            logging.debug(f"Redis using: {redis_config.get('host')}:{redis_config.get('port')}")
+            logging.debug(f"Redis using: {redis_config.get('host')}:\
+                {redis_config.get('port')}")
             cache = "redis"
-        except:
+        except Exception:
             logging.error("Redis unreachable, switching to internal cache")
             config['redis']['enabled'] = False
     else:
@@ -46,7 +47,7 @@ while not cache:
         logging.info("Internal Cache set")
 
 # Create whitelist (change to an async function with watchgod)
-with open('./config/whitelist.yaml','r') as f:
+with open('./config/whitelist.yaml', 'r') as f:
     wl_config = yaml.safe_load(f)
 
 wl_ip = set()
@@ -61,8 +62,9 @@ if wl_ip_config:
                 wl_cidr.append(ipaddress.ip_network(i))
             else:
                 wl_ip.add(ipaddress.ip_address(i))
-        except:
-            logging.warning(f"IP address {i} in whitelist is not valid, skipping")
+        except ValueError:
+            logging.warning(f"IP address {i} in whitelist is not valid,\
+                             skipping")
     logging.debug(f"IP_WL created: \nCIDR:{wl_cidr}\nIP:{wl_ip}")
 
 wl_geo_config = wl_config.get('geo')
@@ -71,17 +73,18 @@ if wl_geo_config:
         # Countries with region set
         wl_geo = set([tuple(i.split('/')) for i in wl_geo_config if '/' in i])
         # Countries with no region set
-        o = set([(i,None) for i in wl_geo_config if '/' not in i])
+        o = set([(i, None) for i in wl_geo_config if '/' not in i])
         # Combine sets
         wl_geo.update(o)
         logging.debug(f"Geo whitelist created: {wl_geo}")
-    except:
+    except Exception:
         logging.error("Problem with Geo whitelist config!")
     # Create subset of countries in WL
     wl_country = {i[0] for i in wl_geo}
     logging.debug(f"Countries in WL: {wl_country}")
 
 print('Ready to go')
+
 
 async def app(scope, receive, send):
     assert scope['type'] == 'http'
@@ -90,17 +93,19 @@ async def app(scope, receive, send):
     xff = request.headers['x-forwarded-for']
     decision = await checkIP(xff)
     logging.debug(f"Decision passed as : {decision}")
-    if decision == True:
+    if decision is True:
         response = Response('OK', status_code=200, media_type='text/plain')
     else:
-        response = Response('FORBIDDEN', status_code=403, media_type='text/plain')
+        response = Response('FORBIDDEN', status_code=403,
+                            media_type='text/plain')
     await response(scope, receive, send)
+
 
 async def checkIP(ip):
     # Turn address into an address object
     try:
         ipObj = ipaddress.ip_address(ip)
-    except:
+    except ValueError:
         # Not an ip address object!
         logging.critical(f"{ip} passed to method is not an IP!")
         return False
@@ -117,6 +122,7 @@ async def checkIP(ip):
     else:
         logging.debug(f"Pass {ipObj.compressed} request to accessControl")
         return await accessControl(ipObj)
+
 
 async def accessControl(ipObj):
     # try IP whitelist (esp for CIDR ranges)
@@ -137,6 +143,7 @@ async def accessControl(ipObj):
     # geo query
     return await geoQuery(ipObj.compressed)
 
+
 async def queryIPWL(ipObj):
     # Check if IP in IP WL
     if ipObj in wl_ip:
@@ -151,6 +158,7 @@ async def queryIPWL(ipObj):
         logging.info(f"{ipObj.compressed} not found in IP WL's")
         return False
 
+
 async def redisQuery(ip):
     # If returns True, Send True(200 OK)
     if r.get(ip) == b'True':
@@ -163,6 +171,7 @@ async def redisQuery(ip):
     else:
         logging.debug(f"{ip} not in Redis Cache")
         return None
+
 
 async def internalQuery(ip):
     match = [c for c in internal_cache if ip in c[0]]
@@ -186,12 +195,13 @@ async def internalQuery(ip):
         logging.debug(f"{ip} not in Internal Cache")
         return None
 
+
 async def geoQuery(ip):
     try:
         # Get geo dict
         geo = await getGeo(ip)
         logging.debug(f"Geo info found: {geo}")
-    except:
+    except Exception:
         # Unable to get geo info
         logging.error(f"{ip} BLOCK - Unable to get geo info for IP!")
         return cacheAdd(ip, False)
@@ -201,44 +211,55 @@ async def geoQuery(ip):
         if geo['country_code'] in wl_country:
             logging.debug(f"Country Code: {geo['country_code']} found in WL")
             # Create subset of regions for given country in WL
-            wl_region = {i[1] for i in wl_geo if i[0] == geo['country_code'] and i[1] != None}
-            logging.debug(f"Regions for {geo['country_code']} in WL: {wl_region}")
+            wl_region = {i[1] for i in wl_geo if i[0] == geo['country_code']
+                         and i[1] is not None}
+            logging.debug(f"Regions for {geo['country_code']}\
+                         in WL: {wl_region}")
             # Check if the country we are checking has a region limitation
             if wl_region:
                 try:
                     # Is the request's region in the wl_region WL
                     if geo['region'] in wl_region:
-                        logging.info(f"{ip} OK - Region: {geo['region']} found in WL")
-                        # Reqest region in WL
+                        logging.info(f"{ip} OK - Region: {geo['region']}\
+                                     found in WL")
+                        # Request region in WL
                         return cacheAdd(ip, True)
                     else:
                         # Request region not in WL
-                        logging.info(f"{ip} BLOCK - in Country WL: {geo['country_code']} but {geo['region']} not in WL")
+                        logging.info(f"{ip} BLOCK - in Country WL: \
+                            {geo['country_code']} but {geo['region']} \
+                            not in WL")
                         return cacheAdd(ip, False)
-                except:
+                except Exception:
                     # No region available in request
-                    logging.info(f"{ip} BLOCK - in Country WL: {geo['country_code']}, but no Region for IP (region restriction exists)")
+                    logging.info(f"{ip} BLOCK - in Country WL: \
+                        {geo['country_code']}, but no Region for IP \
+                        (region restriction exists)")
                     return cacheAdd(ip, False)
             else:
                 # No region limitation listed for Country, request OK
-                logging.info(f"{ip} OK - in Country WL: {geo['country_code']}, No Region restriction")
+                logging.info(f"{ip} OK - in Country WL: {geo['country_code']},\
+                     No Region restriction")
                 return cacheAdd(ip, True)
         else:
             # Country Code not in WL
-            logging.info(f"{ip} BLOCK - Country code: {geo['country_code']} not in Geo WL")
+            logging.info(f"{ip} BLOCK - Country code: {geo['country_code']} \
+                not in Geo WL")
             return cacheAdd(ip, False)
 
-    except:
+    except Exception:
         # Reject no country_code found, or problem with wl
-        logging.warning(f"{ip} BLOCK - Problem with Geo WL or IP has no Country Code!")
+        logging.warning(f"{ip} BLOCK - Problem with Geo WL or \
+            IP has no Country Code!")
         return cacheAdd(ip, False)
+
 
 async def getGeo(address):
     """Utilizes geojs.io which currently doesn't have any limits on it and is a
-       public API. In the future I might add others as a round-robbin situation
+       public API. In the future I might add others as a round-robin situation
        to reduce data sent to a single endpoint.
     """
-    # Encode ip (especially v6) into url
+    # Encode IP (especially v6) into URL
     url = serviceURL + urllib.parse.quote(address)
 
     async with ClientSession() as session:
@@ -246,9 +267,10 @@ async def getGeo(address):
             html = await response.json()
     return html
 
+
 def cacheAdd(ip, decision):
     if cache == "redis":
-        if decision == True:
+        if decision is True:
             logging.info(f"IP {ip} Whitelisted, adding to Redis Cache")
             r.setex(ip, expiry, 'True')
             return True
@@ -259,7 +281,7 @@ def cacheAdd(ip, decision):
     else:
         now = datetime.datetime.now()
         exp = now + datetime.timedelta(seconds=+expiry)
-        if decision == True:
+        if decision is True:
             internal_cache.add((ip, exp, True))
             logging.info(f"IP {ip} Whitelisted, added to Internal Cache")
             return True
