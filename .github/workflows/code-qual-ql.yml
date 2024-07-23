@@ -12,6 +12,8 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     - uses: ricardochaves/python-lint@v1.4.0
+      with:
+        python-root-list: "src tests"
               
   analyze:
     name: Analyze (${{ matrix.language }})
