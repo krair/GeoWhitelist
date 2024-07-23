@@ -1,8 +1,10 @@
-FROM python:3.10-alpine
+FROM python:3.12-alpine
 
-RUN pip install redis aiohttp starlette uvicorn
+COPY ./requirements.txt /
 
-COPY ./GeoWhitelist.py /app/
+RUN pip install -r /requirements.txt
+
+COPY ./src/geowhitelist.py /app/
 
 COPY ./config /app/config/
 
@@ -19,4 +21,4 @@ WORKDIR /app
 
 ENTRYPOINT ["python3"]
 
-CMD ["/usr/local/bin/uvicorn","--port","9500","--host","0.0.0.0","GeoWhitelist:app"]
+CMD ["/usr/local/bin/uvicorn","--port","9500","--host","0.0.0.0","geowhitelist:app"]
