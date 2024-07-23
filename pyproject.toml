@@ -1,0 +1,12 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "geowhitelist"
+version = "0.2.2"
+
+[tool.pytest.ini_options]
+addopts = [
+    "--import-mode=importlib",
+]
