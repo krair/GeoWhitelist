@@ -1,6 +1,7 @@
 from starlette.requests import Request
 from starlette.responses import Response
 
+import os
 import redis
 import ipaddress
 import logging
@@ -11,7 +12,17 @@ import asyncio
 import datetime
 import yaml
 
-with open('./config/config.yaml', 'r') as config_file:
+# Set config paths (should probably turn this into a bootstrap function)
+absolutepath = os.path.abspath(__file__)
+fileDirectory = os.path.dirname(absolutepath)
+
+if fileDirectory == "/app":
+    configDirectory = "/app/config/"
+else:
+    configDirectory = os.path.dirname(fileDirectory) + "/config"
+
+
+with open(configDirectory + "/config.yaml", 'r') as config_file:
     config = yaml.safe_load(config_file)
 
 # Default 3h window to keep in Redis
@@ -20,7 +31,7 @@ expiry = int(config.get('cache_expiry', 10800))
 serviceURL = config.get('service_url')
 
 # Set Logging config
-logging.config.fileConfig(config.get('logging'))
+logging.config.dictConfig(config.get('logging'))
 
 # Setup cache
 cache = False
@@ -47,7 +58,7 @@ while not cache:
         logging.info("Internal Cache set")
 
 # Create whitelist (change to an async function with watchgod)
-with open('./config/whitelist.yaml', 'r') as f:
+with open(configDirectory + '/whitelist.yaml', 'r') as f:
     wl_config = yaml.safe_load(f)
 
 wl_ip = set()
@@ -261,10 +272,11 @@ async def getGeo(address):
     """
     # Encode IP (especially v6) into URL
     url = serviceURL + urllib.parse.quote(address)
-
+    logging.debug(f"URL: {url}")
     async with ClientSession() as session:
         async with session.get(url) as response:
             html = await response.json()
+    logging.debug(f"Response from geojs.io:\n{html}")
     return html
 
 

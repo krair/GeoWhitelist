@@ -16,6 +16,7 @@ redis:
   #password: ""
 
 logging:
+  version: 1
   formatters:
     form01:
       format: "%(asctime)s - %(levelname)s - %(message)s"
